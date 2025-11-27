@@ -187,4 +187,17 @@ with st.expander("查看详细运行数据表"):
     st.dataframe(sim_data.style.format("{:.2f}"))
 
 # 底部声明
+
 st.caption("注：本工具仅为估算模型，未包含电池衰减曲线、运维成本及复杂的需量管理策略。")
+
+# 在 st.sidebar 的最后加入
+st.sidebar.markdown("---")
+st.sidebar.info(
+    """
+    **🤔 需要更精准的测算？**
+
+    当前模型基于标准策略。如需考虑**需量管理、复杂的充放电逻辑或光储协同**，请联系专家获取定制报告。
+
+    📧 Email: TBD
+    """
+)
