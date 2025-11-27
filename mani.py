@@ -4,200 +4,231 @@ import numpy as np
 import plotly.graph_objects as go
 import numpy_financial as npf
 
-# --- 1. 页面基础配置 ---
-st.set_page_config(page_title="工商业储能 ROI 计算器", layout="wide")
+# --- 1. 页面配置 ---
+st.set_page_config(page_title="工商业储能 ROI (含需量)", layout="wide")
 
-st.title("🔋 工商业储能项目 ROI 估算器")
+st.title("🔋 工商业储能 ROI 估算器 (Pro版)")
+st.caption("支持：分时套利 + 需量管理 (Peak Shaving)")
 st.markdown("---")
 
-# --- 2. 侧边栏：输入参数 ---
-st.sidebar.header("⚙️ 系统参数配置")
+# --- 2. 侧边栏配置 ---
+st.sidebar.header("⚙️ 参数配置")
 
-# 2.1 电池参数
-st.sidebar.subheader("1. 电池储能系统 (BESS)")
-batt_capacity = st.sidebar.number_input("额定容量 (kWh)", value=200.0, step=10.0)
-batt_power = st.sidebar.number_input("额定功率 (kW)", value=100.0, step=10.0)
-eff = st.sidebar.slider("充放电循环效率 (%)", 80, 100, 90) / 100.0
-dod = st.sidebar.slider("放电深度 DOD (%)", 80, 100, 90) / 100.0
-system_cost_per_kwh = st.sidebar.number_input("系统单价 (元/kWh)", value=1200.0, step=50.0)
+# 2.1 电池系统
+with st.sidebar.expander("1. 电池储能系统 (BESS)", expanded=True):
+    batt_capacity = st.number_input("额定容量 (kWh)", value=215.0, step=10.0)
+    batt_power = st.number_input("额定功率 (kW)", value=100.0, step=10.0)
+    eff = st.slider("循环效率 (%)", 80, 100, 90) / 100.0
+    dod = st.slider("放电深度 DOD (%)", 80, 100, 90) / 100.0
+    system_cost_per_kwh = st.number_input("系统单价 (元/kWh)", value=1100.0, step=50.0)
+    capex = batt_capacity * system_cost_per_kwh
 
-# 计算总投资 (CAPEX)
-capex = batt_capacity * system_cost_per_kwh
+# 2.2 电价策略
+with st.sidebar.expander("2. 电度电价 (元/kWh)", expanded=False):
+    price_peak = st.number_input("峰时电价", value=1.15)
+    price_flat = st.number_input("平时电价", value=0.75)
+    price_valley = st.number_input("谷时电价", value=0.32)
+    st.info("🕒 默认时段：\n谷: 0-8点\n峰: 12-14, 18-22点\n平: 其他")
 
-# 2.2 电价策略 (简化版：定义时段电价)
-st.sidebar.subheader("2. 电价策略 (元/kWh)")
-# 默认值：模拟典型的峰谷价差
-price_peak = st.sidebar.number_input("峰时电价 (Peak)", value=1.2)
-price_flat = st.sidebar.number_input("平时电价 (Flat)", value=0.7)
-price_valley = st.sidebar.number_input("谷时电价 (Valley)", value=0.3)
+# 2.3 需量电价 (新增核心功能)
+with st.sidebar.expander("3. 需量电价 (基本电费)", expanded=True):
+    demand_price = st.number_input("需量电价 (元/kW/月)", value=40.0, help="按最大需量计算的基本电费单价")
+    st.caption("注：此处假设每月都能成功削减到目标值")
 
-# 简单的时段定义 (Demo用途，实际可做成更复杂的交互)
-st.sidebar.markdown("📅 **时段设置 (默认)**")
-st.sidebar.info(
-    """
-    - 谷时 (充电): 00:00 - 08:00
-    - 平时 (待机): 08:00 - 12:00, 14:00 - 18:00
-    - 峰时 (放电): 12:00 - 14:00, 18:00 - 22:00
-    """
-)
+# --- 3. 数据加载与模拟 ---
 
-# --- 3. 主界面：数据加载与模拟 ---
+# 3.1 负载数据
+st.subheader("📊 负荷曲线分析")
+uploaded_file = st.file_uploader("上传负荷 CSV (选填)", type=["csv"])
 
-# 3.1 生成或上传负载数据
-st.subheader("📊 负荷曲线与策略模拟")
-
-uploaded_file = st.file_uploader("上传负荷数据 CSV (格式：时间, 功率)", type=["csv"])
-
-# 构建 24小时 时间轴
 hours = np.arange(0, 24, 1)
 
-if uploaded_file is not None:
-    # 这里预留读取 CSV 的逻辑，为演示方便，我们主要通过模拟数据
-    df = pd.read_csv(uploaded_file)
-    st.success("文件上传成功！(演示版将继续使用模拟逻辑进行计算)")
+if uploaded_file:
+    try:
+        df = pd.read_csv(uploaded_file)
+        # 假设第一列是时间，第二列是功率，这里做简单处理
+        load_curve = df.iloc[:, 1].values[:24] 
+        st.success("已加载自定义负荷数据")
+    except:
+        st.error("CSV格式有误，使用模拟数据")
+        load_curve = np.array([50]*24)
 else:
-    # 生成模拟的工厂负载曲线 (双峰形态)
-    load_curve = 50 + 30 * np.sin((hours - 8) / 4) + 20 * np.sin((hours - 16) / 2)
-    # 保证负载不为负数
-    load_curve = np.maximum(load_curve, 10)
+    # 模拟一个带尖峰的工厂负载 (用于演示削峰)
+    # 早上8点开工，中午休息，下午有个大尖峰
+    base_load = 100
+    load_curve = base_load + \
+                 50 * np.sin((hours - 8)/3)**2 + \
+                 150 * np.exp(-((hours - 15)**2)/4) # 下午3点有个 250kW 的尖峰
+    load_curve = np.maximum(load_curve, 20)
 
-# 3.2 核心算法：构建 24小时 策略表
-# 创建一个 DataFrame 来存储每小时的状态
+# 获取原始最大需量
+original_max_demand = np.max(load_curve)
+
+# 3.2 设定削峰目标 (阈值)
+col_a, col_b = st.columns([1, 2])
+with col_a:
+    st.metric("原始最大需量", f"{original_max_demand:.1f} kW")
+with col_b:
+    # 默认削减到原本的 80% 或者 电池功率能覆盖的范围
+    default_threshold = max(0, original_max_demand - batt_power * 0.8)
+    threshold = st.slider("📉 设定目标需量 (削峰阈值 kW)", 
+                          min_value=0.0, 
+                          max_value=float(original_max_demand), 
+                          value=float(default_threshold),
+                          help="系统将尝试通过放电，把电网取电限制在这个值以下")
+
+# --- 4. 核心算法：削峰 + 套利 ---
+
+# 初始化
 sim_data = pd.DataFrame(index=hours)
 sim_data['Hour'] = hours
-sim_data['Load_kW'] = load_curve if uploaded_file is None else [100]*24 # 简化处理
+sim_data['Load'] = load_curve
+sim_data['Threshold'] = threshold
 
-# 定义每小时的电价
+# 电价函数
 def get_price(h):
-    # 谷时：0-8点
     if 0 <= h < 8: return price_valley
-    # 峰时：12-14点 或 18-22点
     elif (12 <= h < 14) or (18 <= h < 22): return price_peak
-    # 其他为平时
     else: return price_flat
 
 sim_data['Price'] = sim_data['Hour'].apply(get_price)
 
-# 模拟充放电逻辑
-# 规则：谷时充满，峰时放空。
-# 注意：这里是简化的策略，实际策略会更复杂(需量控制等)
-actions = []
-battery_flow = [] # 正数为放电，负数为充电
-
-current_soc = 0.0 # 初始电量
-usable_capacity = batt_capacity * dod # 可用容量
+# 逐小时模拟
+soc = 0.0 # 初始电量
+usable_cap = batt_capacity * dod
+batt_actions = [] # 电池功率 (+放 -充)
 
 for i in range(24):
     h = sim_data.iloc[i]['Hour']
-    p = sim_data.iloc[i]['Price']
+    load = sim_data.iloc[i]['Load']
+    price = sim_data.iloc[i]['Price']
     
-    flow = 0
+    power = 0.0
     
-    # 策略逻辑
-    if p == price_valley: 
-        # 充电逻辑：尽可能充满
-        charge_energy = min(batt_power, usable_capacity - current_soc)
-        flow = -charge_energy # 充电为负
-        # 计入效率损耗 (充进去 10度，实际电池里增加 10 * sqrt(eff))
-        # 为简化，我们假设损耗发生在充电侧
-        current_soc += charge_energy * eff 
+    # ------------------------------------------------
+    # 策略优先级 1: 削峰 (Peak Shaving) - 必须动作
+    # ------------------------------------------------
+    if load > threshold:
+        # 需要削减的功率
+        needed_shave = load - threshold
+        # 电池能提供的最大功率 (受限于额定功率 和 剩余电量)
+        max_discharge_by_soc = soc 
+        actual_shave = min(needed_shave, batt_power, max_discharge_by_soc)
         
-    elif p == price_peak:
-        # 放电逻辑：尽可能放空
-        discharge_energy = min(batt_power, current_soc)
-        flow = discharge_energy
-        current_soc -= discharge_energy
-    
+        power = actual_shave # 正数为放电
+        soc -= actual_shave # 扣减电量
+        
+    # ------------------------------------------------
+    # 策略优先级 2: 套利 (Arbitrage) - 可选动作
+    # 只有在不需要削峰的时候，才考虑价格套利
+    # ------------------------------------------------
     else:
-        # 平时：待机
-        flow = 0
-        
-    battery_flow.append(flow)
+        # 谷价 -> 充电
+        if price == price_valley:
+            # 尽可能充，但不能超过容量限制
+            max_charge = min(batt_power, usable_cap - soc)
+            power = -max_charge # 负数为充电
+            soc += max_charge * eff # 计入充电效率
+            
+        # 峰价 -> 放电 (但要保留一部分电量给未来的削峰吗？)
+        # 简化逻辑：如果是峰价，且不需要削峰，就放电赚钱
+        # (高级逻辑需要预测未来负载，这里做简化处理)
+        elif price == price_peak:
+            # 尽可能放
+            max_discharge = min(batt_power, soc)
+            power = max_discharge
+            soc -= max_discharge
+            
+        else:
+            power = 0 # 平价待机
 
-sim_data['Battery_kW'] = battery_flow
+    batt_actions.append(power)
 
-# --- 4. 财务计算 ---
+sim_data['Battery_kW'] = batt_actions
+# 计算实际电网取电 = 负载 - 电池放电 (如果是充电，则是 负载 - (-充电) = 负载 + 充电)
+sim_data['Grid_kW'] = sim_data['Load'] - sim_data['Battery_kW'] 
 
-# 计算每日收益
-# 收益 = 放电电量 * 电价 (收入) - 充电电量 * 电价 (成本)
-# 注意：Battery_kW 正数为放，负数为充
-sim_data['Cash_Flow'] = sim_data.apply(
-    lambda x: (x['Battery_kW'] * x['Price']) if x['Battery_kW'] > 0 else (x['Battery_kW'] * x['Price']), 
-    axis=1
+# --- 5. 财务计算 ---
+
+# 5.1 需量收益计算
+new_max_demand = sim_data['Grid_kW'].max()
+demand_reduction = original_max_demand - new_max_demand
+# 每月节省 = 削减的功率 * 单价
+monthly_demand_savings = demand_reduction * demand_price
+annual_demand_savings = monthly_demand_savings * 12
+
+# 5.2 电度收益计算 (套利)
+# 收益 = 放电收入 - 充电成本
+sim_data['Elec_Cost_Savings'] = sim_data.apply(
+    lambda x: (x['Battery_kW'] * x['Price']), axis=1
 )
+daily_elec_savings = sim_data['Elec_Cost_Savings'].sum()
+annual_elec_savings = daily_elec_savings * 330 # 假设运行330天
 
-daily_profit = sim_data['Cash_Flow'].sum()
-days_per_year = 330 # 假设每年运行 330 天
-annual_profit = daily_profit * days_per_year
+# 5.3 总收益
+total_annual_savings = annual_demand_savings + annual_elec_savings
+payback = capex / total_annual_savings if total_annual_savings > 0 else 99
 
-# 回收期
-payback_period = capex / annual_profit if annual_profit > 0 else 99.9
+# --- 6. 结果展示 ---
 
-# IRR 计算 (简化版：假设运行10年)
-cash_flows = [-capex] + [annual_profit] * 10
-irr = npf.irr(cash_flows) * 100
+st.subheader("💰 收益分析")
 
-# --- 5. 结果展示 ---
-
-# 5.1 关键指标卡片
+# 指标卡片
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("项目总投资 (CAPEX)", f"¥ {capex:,.0f}")
-c2.metric("预估年收益", f"¥ {annual_profit:,.0f}", delta_color="normal")
-c3.metric("静态回收期", f"{payback_period:.2f} 年", delta_color="inverse")
-c4.metric("IRR (10年期)", f"{irr:.2f} %")
+c1.metric("1. 需量电费节省 (年)", f"¥ {annual_demand_savings:,.0f}", 
+          delta=f"需量降低 {demand_reduction:.1f} kW")
+c2.metric("2. 峰谷套利收益 (年)", f"¥ {annual_elec_savings:,.0f}")
+c3.metric("🔥 总年化收益", f"¥ {total_annual_savings:,.0f}")
+c4.metric("静态回收期", f"{payback:.2f} 年", delta_color="inverse")
 
-# 5.2 图表可视化 (Plotly)
+# 可视化图表
 fig = go.Figure()
 
-# 轴1：功率 (负载 & 电池)
+# 1. 原始负荷 (灰色填充)
 fig.add_trace(go.Scatter(
-    x=sim_data['Hour'], y=sim_data['Load_kW'],
-    name='工厂原有负荷 (kW)',
-    fill='tozeroy', line=dict(color='gray', width=1), opacity=0.3
+    x=sim_data['Hour'], y=sim_data['Load'],
+    name='原始负荷',
+    fill='tozeroy', line=dict(color='gray', width=0), opacity=0.2
 ))
 
+# 2. 削峰后电网负荷 (粗线)
+fig.add_trace(go.Scatter(
+    x=sim_data['Hour'], y=sim_data['Grid_kW'],
+    name='削峰后电网取电',
+    line=dict(color='#2563eb', width=3)
+))
+
+# 3. 需量红线 (虚线)
+fig.add_trace(go.Scatter(
+    x=[0, 23], y=[threshold, threshold],
+    name=f'目标需量 ({threshold:.0f}kW)',
+    line=dict(color='red', dash='dash', width=2)
+))
+
+# 4. 电池动作 (柱状图)
 fig.add_trace(go.Bar(
     x=sim_data['Hour'], y=sim_data['Battery_kW'],
-    name='电池充放电功率 (kW)',
-    marker_color=sim_data['Battery_kW'].apply(lambda x: '#ef553b' if x > 0 else '#00cc96')
-))
-
-# 轴2：电价
-fig.add_trace(go.Scatter(
-    x=sim_data['Hour'], y=sim_data['Price'],
-    name='电价 (元/kWh)',
-    line=dict(color='orange', dash='dot', width=2),
+    name='电池动作 (+放 -充)',
+    marker_color=sim_data['Battery_kW'].apply(lambda x: '#ef4444' if x > 0 else '#10b981'),
+    opacity=0.8,
     yaxis='y2'
 ))
 
-# 布局设置
 fig.update_layout(
-    title="24小时 功率运行模拟 & 电价曲线",
-    xaxis=dict(title="时间 (小时)"),
+    title="削峰填谷策略模拟 (24小时)",
+    xaxis_title="时间 (小时)",
     yaxis=dict(title="功率 (kW)", side="left"),
-    yaxis2=dict(title="电价 (元)", side="right", overlaying="y", showgrid=False),
+    yaxis2=dict(title="电池功率", side="right", overlaying="y", showgrid=False),
     legend=dict(orientation="h", y=1.1),
-    template="plotly_white"
+    hovermode="x unified"
 )
 
 st.plotly_chart(fig, use_container_width=True)
 
-# 5.3 数据明细
-with st.expander("查看详细运行数据表"):
-    st.dataframe(sim_data.style.format("{:.2f}"))
+# 底部数据表
+with st.expander("查看详细数据表"):
+    st.dataframe(sim_data.style.format("{:.2f}").background_gradient(subset=['Battery_kW'], cmap='RdYlGn_r'))
 
-# 底部声明
-
-st.caption("注：本工具仅为估算模型，未包含电池衰减曲线、运维成本及复杂的需量管理策略。")
-
-# 在 st.sidebar 的最后加入
+# 营销钩子
 st.sidebar.markdown("---")
-st.sidebar.info(
-    """
-    **🤔 需要更精准的测算？**
-
-    当前模型基于标准策略。如需考虑**需量管理、复杂的充放电逻辑或光储协同**，请联系专家获取定制报告。
-
-    📧 Email: TBD
-    """
-)
+st.sidebar.info("💡 **提示：** 需量管理策略非常依赖准确的负荷预测。如需定制**AI预测控制算法**，请联系专家团队。")
